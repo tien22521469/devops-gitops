@@ -7,6 +7,8 @@ pipeline {
         EKS_CLUSTER_NAME = 'emartapp-cluster'
         ARGOCD_SERVER = 'argocd-server'
         ARGOCD_NAMESPACE = 'argocd'
+        APP_NAME = "devops"
+        RELEASE = "1.0.0"
     }
     
     stages {
@@ -95,6 +97,28 @@ pipeline {
                             
                             # Verify Security Contexts
                             kubectl get pods -n emartapp -o json | jq '.items[].spec.securityContext'
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    withAWS(credentials: 'aws-credentials', region: env.AWS_REGION) {
+                        sh """
+                            aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                            
+                            # Verify deployments
+                            kubectl rollout status deployment/backend -n emartapp
+                            kubectl rollout status deployment/frontend -n emartapp
+                            
+                            # Verify services
+                            kubectl get svc -n emartapp
+                            
+                            # Verify ingress
+                            kubectl get ingress -n emartapp
                         """
                     }
                 }
