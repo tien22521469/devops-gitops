@@ -1,40 +1,124 @@
 pipeline {
     agent any
+    
     environment {
-          APP_NAME = "devops"
+        DOCKER_REGISTRY = 'your-docker-registry'
+        AWS_REGION = 'us-east-1'
+        EKS_CLUSTER_NAME = 'emartapp-cluster'
+        ARGOCD_SERVER = 'argocd-server'
+        ARGOCD_NAMESPACE = 'argocd'
     }
+    
     stages {
-         stage("Cleanup Workspace") {
-             steps {
-                cleanWs()
-             }
-         }
-         stage("Checkout from Git") {
-             steps {
-                     git branch: 'main', credentialsId: 'github', url: 'https://github.com/tien22521469/devops-gitops'
-             }
-         }
-         stage("Update the Deployment Tags") {
+        stage('Checkout') {
             steps {
-                sh """
-                    cat deployment.yaml
-                    sed -i 's/${APP_NAME}.*/${APP_NAME}:${IMAGE_TAG}/g' deployment.yaml
-                    cat deployment.yaml
-                """
+                checkout scm
             }
-         }
-         stage("Push the changed deployment file to GitHub") {
+        }
+        
+        stage('Security Scan') {
             steps {
-                sh """
-                    git config --global user.name "tien22521469"
-                    git config --global user.email "22521469@gm.uit.edu.vn"
-                    git add deployment.yaml
-                    git commit -m "Updated Deployment Manifest"
-                """
-                withCredentials([gitUsernamePassword(credentialsId: 'github', gitToolName: 'Default')]) {
-                    sh "git push https://github.com/tien22521469/devops-gitops main"
+                script {
+                    // Scan Kubernetes manifests
+                    sh 'kubesec scan k8s/base/*.yaml > kubesec-report.json'
+                    
+                    // Scan Docker images
+                    sh """
+                        trivy image ${DOCKER_REGISTRY}/emartapp-backend:${BUILD_NUMBER} --format json > trivy-backend-report.json
+                        trivy image ${DOCKER_REGISTRY}/emartapp-frontend:${BUILD_NUMBER} --format json > trivy-frontend-report.json
+                    """
+                    
+                    // Check for critical vulnerabilities
+                    sh """
+                        if grep -q '"Severity": "CRITICAL"' trivy-backend-report.json trivy-frontend-report.json; then
+                            echo "Critical vulnerabilities found!"
+                            exit 1
+                        fi
+                    """
                 }
             }
-         }
+        }
+        
+        stage('Update Kustomization') {
+            steps {
+                script {
+                    sh """
+                        cd k8s/overlays/development
+                        kustomize edit set image backend=${DOCKER_REGISTRY}/emartapp-backend:${BUILD_NUMBER}
+                        kustomize edit set image frontend=${DOCKER_REGISTRY}/emartapp-frontend:${BUILD_NUMBER}
+                    """
+                }
+            }
+        }
+        
+        stage('Commit Changes') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'github', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        sh """
+                            git config user.name "${GIT_USERNAME}"
+                            git config user.email "${GIT_USERNAME}@example.com"
+                            git add .
+                            git commit -m "Update image tags to ${BUILD_NUMBER}"
+                            git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/your-username/devops-gitops.git HEAD:main
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Verify ArgoCD Sync') {
+            steps {
+                script {
+                    withAWS(credentials: 'aws-credentials', region: env.AWS_REGION) {
+                        sh """
+                            aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                            kubectl wait --for=condition=healthy --timeout=300s application/emartapp -n ${ARGOCD_NAMESPACE}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Security Policies') {
+            steps {
+                script {
+                    withAWS(credentials: 'aws-credentials', region: env.AWS_REGION) {
+                        sh """
+                            aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                            
+                            # Verify Network Policies
+                            kubectl get networkpolicy -n emartapp
+                            
+                            # Verify Pod Security Policies
+                            kubectl get psp emartapp-psp
+                            
+                            # Verify Security Contexts
+                            kubectl get pods -n emartapp -o json | jq '.items[].spec.securityContext'
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            emailext (
+                subject: "CD Pipeline Successful: ${currentBuild.fullDisplayName}",
+                body: "Your CD pipeline has completed successfully. Check console output at ${env.BUILD_URL}",
+                to: '${DEFAULT_RECIPIENTS}'
+            )
+        }
+        failure {
+            emailext (
+                subject: "CD Pipeline Failed: ${currentBuild.fullDisplayName}",
+                body: "Your CD pipeline has failed. Check console output at ${env.BUILD_URL}",
+                to: '${DEFAULT_RECIPIENTS}'
+            )
+        }
     }
 }
