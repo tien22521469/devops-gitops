@@ -3,11 +3,18 @@ kind: Kustomization
 
 namespace: emartapp
 
-bases:
+resources:
   - ../../base
 
 patches:
   - path: replicas-patch.yaml
+    target:
+      kind: Deployment
+      name: backend
+  - path: replicas-patch.yaml
+    target:
+      kind: Deployment
+      name: frontend
   - path: resource-patch.yaml
 
 images:
